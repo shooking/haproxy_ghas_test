@@ -55,6 +55,7 @@ struct certificate_ocsp {
 	unsigned int last_update_status;/* Status of the last OCSP update */
 	unsigned int num_success;	/* Number of successful updates */
 	unsigned int num_failure;	/* Number of failed updates */
+	unsigned int fail_count;	/* Number of successive failures */
 };
 
 struct ocsp_cbk_arg {
