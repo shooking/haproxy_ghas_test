@@ -774,6 +774,7 @@ end:
  */
 
 struct task *ocsp_update_task __read_mostly = NULL;
+static struct proxy *httpclient_ocsp_update_px;
 
 static struct ssl_ocsp_task_ctx {
 	struct certificate_ocsp *cur_ocsp;
@@ -987,6 +988,22 @@ void ocsp_update_response_end_cb(struct httpclient *hc)
 	task_wakeup(task, TASK_WOKEN_MSG);
 }
 
+
+/*
+ * Send a log line that will use the dedicated proxy's error_logformat string.
+ * It uses the sess_log function instead of app_log for instance in order to
+ * benefit from the "generic" items that can be added to a log format line such
+ * as the date and frontend name that can be found at the beginning of the
+ * ocspupdate_log_format line.
+ */
+static void ssl_ocsp_send_log()
+{
+	if (!ssl_ocsp_task_ctx.appctx)
+		return;
+
+	sess_log(ssl_ocsp_task_ctx.appctx->sess);
+}
+
 /*
  * This is the main function of the ocsp auto update mechanism. It has two
  * distinct parts and the branching to one or the other is completely based on
@@ -1079,6 +1096,8 @@ static struct task *ssl_ocsp_update_responses(struct task *task, void *context, 
 			ctx->update_status = OCSP_UPDT_OK;
 			ocsp->last_update_status = ctx->update_status;
 
+			ssl_ocsp_send_log();
+
 			/* Reinsert the entry into the update list so that it can be updated later */
 			ssl_ocsp_update_insert(ocsp);
 			/* Release the reference kept on the updated ocsp response. */
@@ -1157,7 +1176,9 @@ static struct task *ssl_ocsp_update_responses(struct task *task, void *context, 
 		/* Depending on the processing that occurred in
 		 * ssl_ocsp_create_request_details we could either have to send
 		 * a GET or a POST request. */
-		hc = httpclient_new(task, b_data(req_body) ? HTTP_METH_POST : HTTP_METH_GET, ist2(b_orig(req_url), b_data(req_url)));
+		hc = httpclient_new_from_proxy(httpclient_ocsp_update_px, task,
+		                               b_data(req_body) ? HTTP_METH_POST : HTTP_METH_GET,
+		                               ist2(b_orig(req_url), b_data(req_url)));
 		if (!hc) {
 			goto leave;
 		}
@@ -1207,6 +1228,7 @@ wait:
 	return task;
 
 http_error:
+	ssl_ocsp_send_log();
 	/* Reinsert certificate into update list so that it can be updated later */
 	if (ocsp) {
 		++ocsp->num_failure;
@@ -1235,6 +1257,28 @@ http_error:
 	return task;
 }
 
+char ocspupdate_log_format[] = "%ci:%cp [%tr] %ft %[ssl_ocsp_certid] %[ssl_ocsp_status] %{+Q}[ssl_ocsp_status_str] %[ssl_ocsp_fail_cnt] %[ssl_ocsp_success_cnt]";
+
+/*
+ * Initialize the proxy for the OCSP update HTTP client with 2 servers, one for
+ * raw HTTP, the other for HTTPS.
+ */
+static int ssl_ocsp_update_precheck()
+{
+	/* initialize the OCSP update dedicated httpclient */
+	httpclient_ocsp_update_px = httpclient_create_proxy("<HC_OCSP>");
+	if (!httpclient_ocsp_update_px)
+		return 1;
+	httpclient_ocsp_update_px->conf.error_logformat_string = ocspupdate_log_format;
+	httpclient_ocsp_update_px->conf.logformat_string = httpclient_log_format;
+	httpclient_ocsp_update_px->options2 |= PR_O2_NOLOGNORM;
+
+	return 0;
+}
+
+/* initialize the proxy and servers for the HTTP client */
+
+REGISTER_PRE_CHECK(ssl_ocsp_update_precheck);
 
 
 
@@ -1398,7 +1442,9 @@ static int cli_parse_update_ocsp_response(char **args, char *payload, struct app
 		goto end;
 	}
 
-	hc = httpclient_new(appctx, b_data(req_body) ? HTTP_METH_POST : HTTP_METH_GET, ist2(b_orig(req_url), b_data(req_url)));
+	hc = httpclient_new_from_proxy(httpclient_ocsp_update_px, appctx,
+	                               b_data(req_body) ? HTTP_METH_POST : HTTP_METH_GET,
+	                               ist2(b_orig(req_url), b_data(req_url)));
 	if (!hc) {
 		memprintf(&err, "%sCan't allocate httpclient\n", err ? err : "");
 		goto end;
