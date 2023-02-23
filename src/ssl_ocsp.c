@@ -841,6 +841,11 @@ void ssl_destroy_ocsp_update_task(void)
 
 	HA_SPIN_UNLOCK(OCSP_LOCK, &ocsp_tree_lock);
 
+	if (ssl_ocsp_task_ctx.hc) {
+		httpclient_stop_and_destroy(ssl_ocsp_task_ctx.hc);
+		ssl_ocsp_task_ctx.hc = NULL;
+	}
+
 	task_destroy(ocsp_update_task);
 	ocsp_update_task = NULL;
 
