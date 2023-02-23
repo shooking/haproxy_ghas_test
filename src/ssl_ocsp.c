@@ -778,12 +778,33 @@ struct task *ocsp_update_task __read_mostly = NULL;
 static struct ssl_ocsp_task_ctx {
 	struct certificate_ocsp *cur_ocsp;
 	struct httpclient *hc;
+	struct appctx *appctx;
 	int flags;
+	int update_status;
 } ssl_ocsp_task_ctx;
 
 const struct http_hdr ocsp_request_hdrs[] = {
 	{ IST("Content-Type"), IST("application/ocsp-request") },
 	{ IST_NULL, IST_NULL }
+};
+
+enum {
+	OCSP_UPDT_UNKNOWN = 0,
+	OCSP_UPDT_OK = 1,
+	OCSP_UPDT_ERR_HTTP_STATUS = 2,
+	OCSP_UPDT_ERR_HTTP_HDR = 3,
+	OCSP_UPDT_ERR_CHECK = 4,
+	OCSP_UPDT_ERR_INSERT = 5,
+	OCSP_UPDT_ERR_LAST	/* Must be last */
+};
+
+const struct ist ocsp_update_errors[] = {
+	[OCSP_UPDT_UNKNOWN] = IST("Unknown"),
+	[OCSP_UPDT_OK] = IST("Update successful"),
+	[OCSP_UPDT_ERR_HTTP_STATUS] = IST("HTTP error"),
+	[OCSP_UPDT_ERR_HTTP_HDR] = IST("Missing \"ocsp-response\" header"),
+	[OCSP_UPDT_ERR_CHECK] = IST("OCSP response check failure"),
+	[OCSP_UPDT_ERR_INSERT] = IST("Error during insertion")
 };
 
 static struct task *ssl_ocsp_update_responses(struct task *task, void *context, unsigned int state);
@@ -1003,6 +1024,7 @@ static struct task *ssl_ocsp_update_responses(struct task *task, void *context, 
 		hc = ctx->hc;
 		if (ctx->flags & HC_F_RES_STLINE) {
 			if (hc->res.status != 200) {
+				ctx->update_status = OCSP_UPDT_ERR_HTTP_STATUS;
 				goto http_error;
 			}
 			ctx->flags &= ~HC_F_RES_STLINE;
@@ -1021,6 +1043,7 @@ static struct task *ssl_ocsp_update_responses(struct task *task, void *context, 
 				}
 			}
 			if (!found) {
+				ctx->update_status = OCSP_UPDT_ERR_HTTP_HDR;
 				goto http_error;
 			}
 			ctx->flags &= ~HC_F_RES_HDR;
@@ -1036,10 +1059,13 @@ static struct task *ssl_ocsp_update_responses(struct task *task, void *context, 
 			/* Process the body that must be complete since
 			 * HC_F_RES_END is set. */
 			if (ctx->flags & HC_F_RES_BODY) {
-				if (ssl_ocsp_check_response(ocsp->chain, ocsp->issuer, &hc->res.buf, NULL))
+				if (ssl_ocsp_check_response(ocsp->chain, ocsp->issuer, &hc->res.buf, NULL)) {
+					ctx->update_status = OCSP_UPDT_ERR_CHECK;
 					goto http_error;
+				}
 
 				if (ssl_sock_update_ocsp_response(&hc->res.buf, NULL) != 0) {
+					ctx->update_status = OCSP_UPDT_ERR_INSERT;
 					goto http_error;
 				}
 
@@ -1050,6 +1076,8 @@ static struct task *ssl_ocsp_update_responses(struct task *task, void *context, 
 
 			++ocsp->num_success;
 			ocsp->last_update = now.tv_sec;
+			ctx->update_status = OCSP_UPDT_OK;
+			ocsp->last_update_status = ctx->update_status;
 
 			/* Reinsert the entry into the update list so that it can be updated later */
 			ssl_ocsp_update_insert(ocsp);
@@ -1099,6 +1127,7 @@ static struct task *ssl_ocsp_update_responses(struct task *task, void *context, 
 
 		++ocsp->refcount;
 		ctx->cur_ocsp = ocsp;
+		ocsp->last_update_status = OCSP_UPDT_UNKNOWN;
 
 		HA_SPIN_UNLOCK(OCSP_LOCK, &ocsp_tree_lock);
 
@@ -1144,7 +1173,7 @@ static struct task *ssl_ocsp_update_responses(struct task *task, void *context, 
 		hc->ops.res_payload = ocsp_update_response_body_cb;
 		hc->ops.res_end = ocsp_update_response_end_cb;
 
-		if (!httpclient_start(hc)) {
+		if (!(ctx->appctx = httpclient_start(hc))) {
 			goto leave;
 		}
 
@@ -1181,6 +1210,7 @@ http_error:
 	/* Reinsert certificate into update list so that it can be updated later */
 	if (ocsp) {
 		++ocsp->num_failure;
+		ocsp->last_update_status = ctx->update_status;
 		ssl_ocsp_update_insert_after_error(ocsp);
 	}
 
