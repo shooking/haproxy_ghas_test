@@ -63,7 +63,7 @@ jobs:
     - run: |
         echo "Run, Build Application using script"
         sudo apt -y install liblua5.4-dev
-        sudo apt -y install libpcre3 libpcre3-dev-dev
+        sudo apt -y install libpcre3 libpcre3-dev
         sudo apt -y install libsystemd-dev
         
         make clean
