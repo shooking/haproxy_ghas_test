@@ -62,12 +62,12 @@ jobs:
 
     - run: |
         echo "Run, Build Application using script"
-        sudo apt -y install liblua5.4-dev
+        sudo apt -y install liblua5.3-dev
         sudo apt -y install libpcre3 libpcre3-dev
         sudo apt -y install libsystemd-dev
         
         make clean
-        make TAGET=linux-glibx USE_OPENSSL=1 USE_LUA=1 USE_PCRE=1 USE_SYSTEMD=1 LUA_LIB_NAME=lua5.4
+        make TARGET=linux-glibc USE_OPENSSL=1 USE_LUA=1 USE_PCRE=1 USE_SYSTEMD=1 LUA_LIB_NAME=lua5.3
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v2
